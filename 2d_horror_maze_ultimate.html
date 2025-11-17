@@ -1,0 +1,237 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>2D Horror Maze — Ultimate Edition</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    html,body { margin:0; height:100%; background:#000; overflow:hidden; font-family:monospace; }
+    #game { width:100%; height:100vh; display:block; }
+    .ui { position:fixed; left:12px; top:12px; color:#ff5555; font-size:14px; z-index:10; text-shadow: 0 0 4px #000; }
+    .ui.right { position:fixed; right:12px; top:12px; text-align:right; }
+    .hint { position:fixed; left:12px; bottom:12px; color:#999; font-size:13px; z-index:10; text-shadow: 0 0 3px #000; }
+    .center-msg { position:fixed; left:50%; top:50%; transform:translate(-50%,-50%); color:#f5eaea; font-size:22px; padding:18px; background:rgba(0,0,0,0.7); border-radius:8px; text-align:center; z-index:20; display:none; }
+    #startPanel { position:fixed; left:0; top:0; width:100%; height:100%; background:rgba(0,0,0,0.95); color:#ff5555; display:flex; flex-direction:column; justify-content:center; align-items:center; z-index:30; }
+    #startPanel h1 { font-size:36px; text-shadow: 0 0 8px #000; margin-bottom:20px; }
+    #startPanel p { font-size:16px; text-align:center; max-width:500px; line-height:1.5; margin-bottom:30px; }
+    #startBtn { padding:12px 28px; font-size:18px; background:#330000; border:2px solid #ff4444; color:#ff8888; cursor:pointer; border-radius:6px; transition:0.2s; }
+    #startBtn:hover { background:#550000; border-color:#ff6666; color:#ffbbbb; }
+  </style>
+</head>
+<body>
+  <!-- 开始面板 -->
+  <div id="startPanel">
+    <h1>恐怖迷宫 — 终极版</h1>
+    <p>
+      目标：收集 <strong>3 把钥匙</strong> 并找到出口。<br>
+      移动：WASD / 方向键<br>
+      快走：Shift<br>
+      手电闪光：Space<br>
+      交互：E<br><br>
+      注意：敌人会追踪你的声音和位置，小心陷阱和突然出现的恐怖事件！
+    </p>
+    <button id="startBtn">开始游戏</button>
+  </div>
+
+  <div class="ui">目标: <span id="objective">找到3把钥匙并到达出口</span></div>
+  <div class="ui right">钥匙: <span id="keys">0</span>/3 &nbsp; 生命: <span id="hp">3</span></div>
+  <div class="hint">WASD 移动 | Space 手电闪光 | E 交互 | Shift 快走</div>
+  <div id="game"></div>
+  <div id="message" class="center-msg"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/phaser@3/dist/phaser.min.js"></script>
+  <script>
+  // === CONFIG ===
+  const TILE = 48;
+  const MAP_W = 21;
+  const MAP_H = 15;
+  const KEYS_REQUIRED = 3;
+
+  const config = {
+    type: Phaser.AUTO,
+    parent: 'game',
+    width: Math.min(1200, MAP_W*TILE),
+    height: Math.min(800, MAP_H*TILE),
+    backgroundColor: '#000000',
+    physics: { default: 'arcade', arcade: { debug: false } },
+    scene: { preload, create, update }
+  };
+
+  const game = new Phaser.Game(config);
+
+  // === GAME STATE ===
+  let mapData, cursors, keysDown, keyE, keyShift;
+  let player, enemies = [], flashCooldown=false;
+  let keysFound = 0, hp = 3; let collectedPositions = new Set();
+  let lampLight, lampBlend, noiseOverlay;
+  let objectivesText, keysText, hpText;
+  let lastSoundPos = null;
+
+  // === AUDIO HELPERS ===
+  let audioCtx;
+  function ensureAudio(){ if(!audioCtx) audioCtx=new (window.AudioContext||window.webkitAudioContext)(); }
+  function playTone(freq,type='sine',duration=0.12,vol=0.06){
+    ensureAudio();
+    const o=audioCtx.createOscillator(), g=audioCtx.createGain();
+    o.type=type; o.frequency.value=freq; g.gain.value=vol;
+    o.connect(g); g.connect(audioCtx.destination);
+    o.start(); o.stop(audioCtx.currentTime+duration);
+  }
+  function playNoise(duration=0.4,vol=0.04){
+    ensureAudio();
+    const buffer=audioCtx.createBuffer(1,audioCtx.sampleRate*duration,audioCtx.sampleRate);
+    const data=buffer.getChannelData(0);
+    for(let i=0;i<data.length;i++) data[i]=(Math.random()*2-1)*0.6;
+    const src=audioCtx.createBufferSource(); src.buffer=buffer;
+    const g=audioCtx.createGain(); g.gain.value=vol;
+    src.connect(g); g.connect(audioCtx.destination); src.start();
+  }
+
+  // === MAZE GENERATION ===
+  function generateMaze(w,h){
+    const grid=Array.from({length:h},()=>Array.from({length:w},()=>1));
+    function inBounds(x,y){return x>0&&x<w-1&&y>0&&y<h-1;}
+    let sx=1+2*Math.floor(Math.random()*((w-1)/2));
+    let sy=1+2*Math.floor(Math.random()*((h-1)/2));
+    grid[sy][sx]=0;
+    const stack=[[sx,sy]]; const dirs=[[2,0],[-2,0],[0,2],[0,-2]];
+    while(stack.length){
+      const [cx,cy]=stack[stack.length-1]; const neighbors=[];
+      for(const [dx,dy] of dirs){ const nx=cx+dx, ny=cy+dy; if(inBounds(nx,ny)&&grid[ny][nx]===1) neighbors.push([nx,ny,dx,dy]); }
+      if(neighbors.length===0){ stack.pop(); continue; }
+      const [nx,ny,dx,dy]=Phaser.Math.RND.pick(neighbors);
+      grid[ny][nx]=0; grid[cy+dy/2][cx+dx/2]=0; stack.push([nx,ny]);
+    }
+    return {grid,start:[sx,sy]};
+  }
+
+  function preload(){ const scene=this; ['floor','wall','player','enemy','key','exit','noise'].forEach(tex=>scene.textures.createCanvas(tex,TILE,TILE)); }
+
+  function create(){
+    const maze=generateMaze(MAP_W,MAP_H); mapData=maze.grid;
+
+    // 地图显示
+    this.add.group();
+    for(let y=0;y<MAP_H;y++){
+      for(let x=0;x<MAP_W;x++){
+        const px=x*TILE, py=y*TILE;
+        this.add.rectangle(px+TILE/2,py+TILE/2,TILE,TILE,mapData[y][x]===1?0x111111:0x222222).setDepth(0);
+      }
+    }
+
+    // 玩家
+    const [sx,sy]=maze.start;
+    player=this.physics.add.sprite(sx*TILE+TILE/2,sy*TILE+TILE/2,'player').setDepth(2).setCollideWorldBounds(true);
+
+    // 摄像机
+    this.cameras.main.setBounds(0,0,MAP_W*TILE,MAP_H*TILE);
+    this.cameras.main.startFollow(player,true,0.12,0.12);
+
+    // 灯光
+    lampLight=this.add.circle(player.x,player.y,TILE*2.6,0xffffcc,0.08).setDepth(3);
+    lampBlend=this.add.circle(player.x,player.y,TILE*2.6).setBlendMode(Phaser.BlendModes.ADD).setAlpha(0.5).setDepth(3);
+    noiseOverlay=this.add.rectangle(0,0,MAP_W*TILE,MAP_H*TILE,0xffffff,0.04).setOrigin(0).setScrollFactor(0).setDepth(9);
+
+    placeCollectables(this); placeExit(this); spawnEnemies(this);
+
+    cursors=this.input.keyboard.createCursorKeys();
+    keysDown=this.input.keyboard.addKeys({W:'W',A:'A',S:'S',D:'D'});
+    keyE=this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.E);
+    keyShift=this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.SHIFT);
+
+    objectivesText=document.getElementById('objective');
+    keysText=document.getElementById('keys'); hpText=document.getElementById('hp');
+    updateUI();
+
+    keyE.on('down',()=>{ tryOpenExit(this); });
+
+    // 暗黑音效循环
+    this.time.addEvent({ delay:4000, loop:true, callback:()=>{ if(Math.random()<0.5) playNoise(0.35,0.02); if(Math.random()<0.35) playTone(200+Math.random()*300,'sine',0.12,0.02); } });
+  }
+
+  function update(){
+    let speed=140; if(keyShift.isDown) speed*=1.4;
+    let vx=0,vy=0;
+    if(cursors.left.isDown||keysDown.A.isDown) vx=-speed;
+    if(cursors.right.isDown||keysDown.D.isDown) vx=speed;
+    if(cursors.up.isDown||keysDown.W.isDown) vy=-speed;
+    if(cursors.down.isDown||keysDown.S.isDown) vy=speed;
+    player.setVelocity(vx,vy);
+
+    lampLight.setPosition(player.x,player.y);
+    lampBlend.setPosition(player.x,player.y);
+
+    enemies.forEach(e=>{
+      const angle=Phaser.Math.Angle.Between(e.sprite.x,e.sprite.y,player.x,player.y);
+      e.sprite.x+=Math.cos(angle)*(e.speed/60); e.sprite.y+=Math.sin(angle)*(e.speed/60);
+      if(Phaser.Math.Distance.Between(player.x,player.y,e.sprite.x,e.sprite.y)<22) onPlayerHit();
+    });
+
+    checkCollectables(); checkExitCollision();
+
+    if(Phaser.Input.Keyboard.JustDown(this.input.keyboard.addKey('SPACE'))) flashEffect(this);
+  }
+
+  // === HELPERS ===
+  function placeCollectables(scene){
+    scene.keysGroup=scene.add.group(); let placed=0;
+    for(let i=0;i<500&&placed<KEYS_REQUIRED;i++){
+      const x=Phaser.Math.Between(1,MAP_W-2), y=Phaser.Math.Between(1,MAP_H-2);
+      if(mapData[y][x]===0&&!collectedPositions.has(`${x}_${y}`)){
+        const spr=scene.add.rectangle(x*TILE+TILE/2,y*TILE+TILE/2,26,26,0xffcc33).setDepth(2);
+        spr._grid=[x,y]; scene.keysGroup.add(spr); placed++; collectedPositions.add(`${x}_${y}`);
+      }
+    }
+  }
+
+  function placeExit(scene){
+    scene.exitPos={x:TILE*(MAP_W-2)+TILE/2, y:TILE*(MAP_H-2)+TILE/2};
+    scene.exitSprite=scene.add.rectangle(scene.exitPos.x,scene.exitPos.y,TILE*0.9,TILE*0.9,0x006600).setDepth(1.5);
+    scene.exitOpen=false;
+  }
+
+  function spawnEnemies(scene){ enemies=[]; for(let i=0;i<3;i++){
+    const ex=Phaser.Math.Between(2,MAP_W-2), ey=Phaser.Math.Between(2,MAP_H-2);
+    const spr=scene.physics.add.sprite(ex*TILE+TILE/2,ey*TILE+TILE/2,'enemy').setDepth(2);
+    enemies.push({sprite:spr,speed:60});
+  }}
+
+  function checkCollectables(){
+    if(!this.keysGroup) return;
+    const px=Math.floor(player.x/TILE), py=Math.floor(player.y/TILE);
+    this.keysGroup.getChildren().forEach(k=>{
+      const [gx,gy]=k._grid; if(px===gx&&py===gy){ k.destroy(); keysFound++; updateUI(); playTone(900,'triangle',0.12,0.06); if(keysFound>=KEYS_REQUIRED) objectivesText.innerText='已收集所有钥匙，前往出口'; }
+    });
+  }
+
+  function checkExitCollision(){
+    if(!this.exitSprite) return;
+    const d=Phaser.Math.Distance.Between(player.x,player.y,this.exitSprite.x,this.exitSprite.y);
+    if(d<24&&keysFound>=KEYS_REQUIRED){ showMessage('恭喜你，逃脱成功！'); this.scene.pause(); }
+  }
+
+  function tryOpenExit(scene){
+    if(!scene.exitSprite) return;
+    const d=Phaser.Math.Distance.Between(player.x,player.y,scene.exitSprite.x,scene.exitSprite.y);
+    if(d<32){ if(keysFound>=KEYS_REQUIRED){ scene.exitOpen=true; playTone(660); showMessage('出口开启！'); } else playTone(220); }
+  }
+
+  function onPlayerHit(){ hp--; updateUI(); playNoise(); if(hp<=0){ showMessage('你已死亡，游戏结束！'); player.setTint(0xff0000); player.setVelocity(0,0); } }
+
+  function flashEffect(scene){
+    if(flashCooldown) return; flashCooldown=true; setTimeout(()=>flashCooldown=false,400);
+    enemies.forEach(e=>{ const d=Phaser.Math.Distance.Between(player.x,player.y,e.sprite.x,e.sprite.y); if(d<TILE*3){ e.sprite.x+=(Math.random()-0.5)*TILE*1.5; e.sprite.y+=(Math.random()-0.5)*TILE*1.5; } });
+    playTone(880,'square');
+  }
+
+  function updateUI(){ keysText.innerText=keysFound; hpText.innerText=hp; }
+  function showMessage(msg){ const m=document.getElementById('message'); m.innerText=msg; m.style.display='block'; setTimeout(()=>{ m.style.display='none'; },4000); }
+
+  // === START PANEL ===
+  document.getElementById('startBtn').addEventListener('click',()=>{
+    document.getElementById('startPanel').style.display='none';
+    game.scene.scenes[0].scene.resume();
+  });
+  </script>
+</body>
+</html>
